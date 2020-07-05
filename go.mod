@@ -1,4 +1,4 @@
-module github.com/oliver006/redis_exporter
+module github.com/gukz/redis_exporter
 
 go 1.13
 

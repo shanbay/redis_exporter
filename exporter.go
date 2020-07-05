@@ -384,6 +384,12 @@ func NewRedisExporter(redisURI string, opts Options) (*Exporter, error) {
 		"start_time_seconds":                   {txt: "Start time of the Redis instance since unix epoch in seconds."},
 		"up":                                   {txt: "Information about the Redis instance"},
 		"connected_clients_details":            {txt: "Details about connected clients", lbls: []string{"host", "port", "name", "age", "idle", "flags", "db", "cmd"}},
+		// 阿里云专有指标
+		"command_call_qps":          {txt: "QPS per command", lbls: []string{"cmd"}},
+		"command_call_rt":           {txt: "The mean response time per command", lbls: []string{"cmd"}},
+		"command_call_max_rt":       {txt: "The max response time per command", lbls: []string{"cmd"}},
+		"command_call_request_len":  {txt: "The mean request len per command", lbls: []string{"cmd"}},
+		"command_call_response_len": {txt: "The mean response len spent per command", lbls: []string{"cmd"}},
 	} {
 		e.metricDescriptions[k] = newMetricDescr(opts.Namespace, k, desc.txt, desc.lbls)
 	}
@@ -699,6 +705,12 @@ func (e *Exporter) handleMetricsCommandStats(ch chan<- prometheus.Metric, fieldK
 
 	var calls float64
 	var usecTotal float64
+	var qps float64
+	var rt float64
+	var maxRt float64
+	var requestLen float64
+	var responseLen float64
+
 	var err error
 	if calls, err = extractVal(splitValue[0]); err != nil {
 		return
@@ -706,10 +718,34 @@ func (e *Exporter) handleMetricsCommandStats(ch chan<- prometheus.Metric, fieldK
 	if usecTotal, err = extractVal(splitValue[1]); err != nil {
 		return
 	}
+	if len(splitValue) > 3 {
+		if qps, err = extractVal(splitValue[3]); err != nil {
+			return
+		}
+		if rt, err = extractVal(splitValue[4]); err != nil {
+			return
+		}
+		if maxRt, err = extractVal(splitValue[5]); err != nil {
+			return
+		}
+		if requestLen, err = extractVal(splitValue[6]); err != nil {
+			return
+		}
+		if responseLen, err = extractVal(splitValue[7]); err != nil {
+			return
+		}
+	}
 
 	cmd := splitKey[1]
 	e.registerConstMetric(ch, "commands_total", calls, prometheus.CounterValue, cmd)
 	e.registerConstMetric(ch, "commands_duration_seconds_total", usecTotal/1e6, prometheus.CounterValue, cmd)
+	if len(splitValue) > 3 {
+		e.registerConstMetric(ch, "command_call_qps", qps, prometheus.CounterValue, cmd)
+		e.registerConstMetric(ch, "command_call_rt", rt/1e6, prometheus.CounterValue, cmd)
+		e.registerConstMetric(ch, "command_call_max_rt", maxRt/1e6, prometheus.CounterValue, cmd)
+		e.registerConstMetric(ch, "command_call_request_len", requestLen, prometheus.CounterValue, cmd)
+		e.registerConstMetric(ch, "command_call_response_len", responseLen, prometheus.CounterValue, cmd)
+	}
 }
 
 func (e *Exporter) handleMetricsReplication(ch chan<- prometheus.Metric, masterHost string, masterPort string, fieldKey string, fieldValue string) bool {
