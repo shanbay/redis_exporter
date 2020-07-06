@@ -718,7 +718,7 @@ func (e *Exporter) handleMetricsCommandStats(ch chan<- prometheus.Metric, fieldK
 	if usecTotal, err = extractVal(splitValue[1]); err != nil {
 		return
 	}
-	if len(splitValue) > 3 {
+	if len(splitValue) > 7 {
 		if qps, err = extractVal(splitValue[3]); err != nil {
 			return
 		}
@@ -739,7 +739,7 @@ func (e *Exporter) handleMetricsCommandStats(ch chan<- prometheus.Metric, fieldK
 	cmd := splitKey[1]
 	e.registerConstMetric(ch, "commands_total", calls, prometheus.CounterValue, cmd)
 	e.registerConstMetric(ch, "commands_duration_seconds_total", usecTotal/1e6, prometheus.CounterValue, cmd)
-	if len(splitValue) > 3 {
+	if len(splitValue) > 7 {
 		e.registerConstMetric(ch, "command_call_qps", qps, prometheus.CounterValue, cmd)
 		e.registerConstMetric(ch, "command_call_rt", rt/1e6, prometheus.CounterValue, cmd)
 		e.registerConstMetric(ch, "command_call_max_rt", maxRt/1e6, prometheus.CounterValue, cmd)
