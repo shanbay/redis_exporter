@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -727,9 +728,8 @@ func TestGetKeysFromPatterns(t *testing.T) {
 	})
 
 	if !reflect.DeepEqual(expectedKeys, expandedKeys) {
-		t.Errorf("When expanding keys:\nexpected: %v\nactual:   %v", expectedKeys, expandedKeys)
+		t.Errorf("When expanding keys:\nexpected: %#v\nactual:   %#v", expectedKeys, expandedKeys)
 	}
-
 }
 
 func TestGetKeyInfo(t *testing.T) {
@@ -1251,26 +1251,33 @@ func TestClusterMaster(t *testing.T) {
 }
 
 func TestPasswordProtectedInstance(t *testing.T) {
-	if os.Getenv("TEST_PWD_REDIS_URI") == "" {
-		t.Skipf("TEST_PWD_REDIS_URI not set - skipping")
+	uriEnvs := []string{
+		"TEST_PWD_REDIS_URI",
+		"TEST_USER_PWD_REDIS_URI",
 	}
-	uri := os.Getenv("TEST_PWD_REDIS_URI")
-	setupDBKeys(t, uri)
 
-	e, _ := NewRedisExporter(uri, Options{Namespace: "test", Registry: prometheus.NewRegistry()})
-	ts := httptest.NewServer(e)
-	defer ts.Close()
+	for _, uriEnvName := range uriEnvs {
+		if os.Getenv(uriEnvName) == "" {
+			t.Logf("%s not set - skipping", uriEnvName)
+			continue
+		}
 
-	chM := make(chan prometheus.Metric, 10000)
-	go func() {
-		e.Collect(chM)
-		close(chM)
-	}()
+		uri := os.Getenv(uriEnvName)
 
-	body := downloadURL(t, ts.URL+"/metrics")
+		e, _ := NewRedisExporter(uri, Options{Namespace: "test", Registry: prometheus.NewRegistry()})
+		ts := httptest.NewServer(e)
+		defer ts.Close()
 
-	if !strings.Contains(body, "test_up") {
-		t.Errorf("error, missing test_up")
+		chM := make(chan prometheus.Metric, 10000)
+		go func() {
+			e.Collect(chM)
+			close(chM)
+		}()
+
+		body := downloadURL(t, ts.URL+"/metrics")
+		if !strings.Contains(body, "test_up") {
+			t.Errorf("%s - response to /metric doesn't contain test_up", uriEnvName)
+		}
 	}
 }
 
@@ -1324,6 +1331,18 @@ func TestClusterSlave(t *testing.T) {
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("Did not find key [%s] \nbody: %s", want, body)
+		}
+	}
+	hostReg, _ := regexp.Compile(`master_host="([0,1]?\d{1,2}|2([0-4][0-9]|5[0-5]))(\.([0,1]?\d{1,2}|2([0-4][0-9]|5[0-5]))){3}"`)
+	masterHost := hostReg.FindString(string(body))
+	portReg, _ := regexp.Compile(`master_port="(\d+)"`)
+	masterPort := portReg.FindString(string(body))
+	for wantedKey, wantedVal := range map[string]int{
+		masterHost: 5,
+		masterPort: 5,
+	} {
+		if res := strings.Count(body, wantedKey); res != wantedVal {
+			t.Errorf("Result: %s -> %d, Wanted: %d \nbody: %s", wantedKey, res, wantedVal, body)
 		}
 	}
 }

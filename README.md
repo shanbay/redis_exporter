@@ -6,6 +6,7 @@
 Prometheus exporter for Redis metrics.\
 Supports Redis 2.x, 3.x, 4.x, 5.x, and 6.x
 
+
 ## Building and running the exporter
 
 ### Build and run locally
@@ -17,9 +18,11 @@ go build .
 ./redis_exporter --version
 ```
 
+
 ### Pre-build binaries
 
 For pre-built binaries please take a look at [the releases](https://github.com/oliver006/redis_exporter/releases).
+
 
 ### Upgrading from 0.x to 1.x
 
@@ -27,7 +30,7 @@ For pre-built binaries please take a look at [the releases](https://github.com/o
 
 If you only scrape one Redis instance and use command line flags `--redis.address`
 and `--redis.password` then you're most probably not affected.
-Otherwise, please see [PR #256](https://github.com/oliver006/redis_exporter/pull/256) and [this README](https://github.com/naseemkullah/redis_exporter/tree/update-readme#prometheus-configuration-to-scrape-multiple-redis-hosts) for more information.
+Otherwise, please see [PR #256](https://github.com/oliver006/redis_exporter/pull/256) and [this README](https://github.com/oliver006/redis_exporter#prometheus-configuration-to-scrape-multiple-redis-hosts) for more information.
 
 ### Basic Prometheus Configuration
 
@@ -41,6 +44,7 @@ scrape_configs:
 ```
 
 and adjust the host name accordingly.
+
 
 ### Kubernetes SD configurations
 
@@ -58,6 +62,7 @@ For example, if the metrics are being scraped via the pod role, one could add:
 as a relabel config to the corresponding scrape config. As per the regex value, only pods with "redis" in their name will be relabelled as such.
 
 Similar approaches can be taken with [other role types](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config) depending on how scrape targets are retrieved.
+
 
 ### Prometheus Configuration to Scrape Multiple Redis Hosts
 
@@ -131,11 +136,13 @@ The `targets-redis-instances.json` should look something like this:
 
 Prometheus uses file watches and all changes to the json file are applied immediately.
 
+
 ### Command line flags
 
 Name                   | Environment Variable Name            | Description
 -----------------------|--------------------------------------|-----------------
 redis.addr             | REDIS_ADDR                           | Address of the Redis instance, defaults to `redis://localhost:6379`.
+redis.user             | REDIS_USER                           | User name to use for authentication (Redis ACL for Redis 6.0 and newer).
 redis.password         | REDIS_PASSWORD                       | Password of the Redis instance, defaults to `""` (no password).
 check-keys             | REDIS_EXPORTER_CHECK_KEYS            | Comma separated list of key patterns to export value and length/size, eg: `db3=user_count` will export key `user_count` from db `3`. db defaults to `0` if omitted. The key patterns specified with this flag will be found using [SCAN](https://redis.io/commands/scan).  Use this option if you need glob pattern matching; `check-single-keys` is faster for non-pattern keys. Warning: using `--check-keys` to match a very large number of keys can slow down the exporter to the point where it doesn't finish scraping the redis instance.
 check-single-keys      | REDIS_EXPORTER_CHECK_SINGLE_KEYS     | Comma separated list of keys to export value and length/size, eg: `db3=user_count` will export key `user_count` from db `3`. db defaults to `0` if omitted.  The keys specified with this flag will be looked up directly without any glob pattern matching.  Use this option if you don't need glob pattern matching;  it is faster than `check-keys`.
@@ -154,6 +161,7 @@ export-client-list     | REDIS_EXPORTER_EXPORT_CLIENT_LIST    | Whether to scrap
 skip-tls-verification  | REDIS_EXPORTER_SKIP_TLS_VERIFICATION | Whether to to skip TLS verification
 tls-client-key-file    | REDIS_EXPORTER_TLS_CLIENT_KEY_FILE   | Name of the client key file (including full path) if the server requires TLS client authentication
 tls-client-cert-file   | REDIS_EXPORTER_TLS_CLIENT_CERT_FILE  | Name the client cert file (including full path) if the server requires TLS client authentication
+tls-ca-cert-file       | REDIS_EXPORTER_TLS_CA_CERT_FILE      | Name of the CA certificate file (including full path) if the server requires TLS client authentication
 set-client-name        | REDIS_EXPORTER_SET_CLIENT_NAME       | Whether to set client name to redis_exporter, defaults to true.
 
 Redis instance addresses can be tcp addresses: `redis://localhost:6379`, `redis.example.com:6379` or e.g. unix sockets: `unix:///tmp/redis.sock`.\
@@ -161,6 +169,7 @@ SSL is supported by using the `rediss://` schema, for example: `rediss://azure-s
 Password-protected instances can be accessed by using the URI format including a password: `redis://h:<<PASSWORD>>@<<HOSTNAME>>:<<PORT>>`
 
 Command line settings take precedence over any configurations provided by the environment variables.
+
 
 ### Run via Docker
 
@@ -199,6 +208,14 @@ In addition, for every database there are metrics for total keys, expiring keys 
 You can also export values of keys if they're in numeric format by using the `-check-keys` flag. The exporter will also export the size (or, depending on the data type, the length) of the key. This can be used to export the number of elements in (sorted) sets, hashes, lists, streams, etc.
 
 If you require custom metric collection, you can provide a [Redis Lua script](https://redis.io/commands/eval) using the `-script` flag. An example can be found [in the contrib folder](./contrib/sample_collect_script.lua).
+
+
+### The redis_memory_max_bytes metric
+
+The metric `redis_memory_max_bytes`  will show the maximum number of bytes Redis can use.\
+It is zero if no memory limit is set for the Redis instance you're scraping (this is the default setting for Redis).\
+You can confirm that's the case by checking if the metric `redis_config_maxmemory` is zero or by connecting to the Redis instance via redis-cli and running the command `CONFIG GET MAXMEMORY`.
+
 
 ## What it looks like
 

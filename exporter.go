@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,7 +17,6 @@ import (
 	"github.com/gomodule/redigo/redis"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	strutil "github.com/prometheus/prometheus/util/strutil"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -51,6 +51,7 @@ type Exporter struct {
 }
 
 type Options struct {
+	User                string
 	Password            string
 	Namespace           string
 	ConfigCommandName   string
@@ -58,6 +59,7 @@ type Options struct {
 	CheckKeys           string
 	LuaScript           []byte
 	ClientCertificates  []tls.Certificate
+	CaCertificates      *x509.CertPool
 	InclSystemMetrics   bool
 	SkipTLSVerification bool
 	SetClientName       bool
@@ -274,16 +276,13 @@ func NewRedisExporter(redisURI string, opts Options) (*Exporter, error) {
 			"repl_backlog_active":            "repl_backlog_is_active",
 			"repl_backlog_first_byte_offset": "repl_backlog_first_byte_offset",
 			"repl_backlog_histlen":           "repl_backlog_history_bytes",
-			"master_last_io_seconds_ago":     "master_last_io_seconds",
 			"master_repl_offset":             "master_repl_offset",
 			"second_repl_offset":             "second_repl_offset",
-			"slave_repl_offset":              "slave_repl_offset",
 			"slave_expires_tracked_keys":     "slave_expires_tracked_keys",
 			"slave_priority":                 "slave_priority",
 			"sync_full":                      "replica_resyncs_full",
 			"sync_partial_ok":                "replica_partial_resync_accepted",
 			"sync_partial_err":               "replica_partial_resync_denied",
-			"master_sync_in_progress":        "master_sync_in_progress",
 
 			// # Cluster
 			"cluster_stats_messages_sent":     "cluster_messages_sent_total",
@@ -374,7 +373,10 @@ func NewRedisExporter(redisURI string, opts Options) (*Exporter, error) {
 		"last_slow_execution_duration_seconds": {txt: `The amount of time needed for last slow execution, in seconds`},
 		"latency_spike_last":                   {txt: `When the latency spike last occurred`, lbls: []string{"event_name"}},
 		"latency_spike_duration_seconds":       {txt: `Length of the last latency spike in seconds`, lbls: []string{"event_name"}},
-		"master_link_up":                       {txt: "Master link status on Redis slave"},
+		"master_link_up":                       {txt: "Master link status on Redis slave", lbls: []string{"master_host", "master_port"}},
+		"master_sync_in_progress":              {txt: "Master sync in progress", lbls: []string{"master_host", "master_port"}},
+		"master_last_io_seconds_ago":           {txt: "Master last io seconds ago", lbls: []string{"master_host", "master_port"}},
+		"slave_repl_offset":                    {txt: "Slave replication offset", lbls: []string{"master_host", "master_port"}},
 		"script_values":                        {txt: "Values returned by the collect script", lbls: []string{"key"}},
 		"slave_info":                           {txt: "Information about the Redis slave", lbls: []string{"master_host", "master_port", "read_only"}},
 		"slowlog_last_id":                      {txt: `Last id of slowlog`},
@@ -382,6 +384,12 @@ func NewRedisExporter(redisURI string, opts Options) (*Exporter, error) {
 		"start_time_seconds":                   {txt: "Start time of the Redis instance since unix epoch in seconds."},
 		"up":                                   {txt: "Information about the Redis instance"},
 		"connected_clients_details":            {txt: "Details about connected clients", lbls: []string{"host", "port", "name", "age", "idle", "flags", "db", "cmd"}},
+		// 阿里云专有指标
+		"command_call_qps":          {txt: "QPS per command", lbls: []string{"cmd"}},
+		"command_call_rt":           {txt: "The mean response time per command", lbls: []string{"cmd"}},
+		"command_call_max_rt":       {txt: "The max response time per command", lbls: []string{"cmd"}},
+		"command_call_request_len":  {txt: "The mean request len per command", lbls: []string{"cmd"}},
+		"command_call_response_len": {txt: "The mean response len spent per command", lbls: []string{"cmd"}},
 	} {
 		e.metricDescriptions[k] = newMetricDescr(opts.Namespace, k, desc.txt, desc.lbls)
 	}
@@ -490,8 +498,12 @@ func (e *Exporter) includeMetric(s string) bool {
 	return ok
 }
 
+var (
+	metricNameRE = regexp.MustCompile(`[^a-zA-Z0-9_]`)
+)
+
 func sanitizeMetricName(n string) string {
-	return strutil.SanitizeLabelName(n)
+	return metricNameRE.ReplaceAllString(n, "_")
 }
 
 func extractVal(s string) (val float64, err error) {
@@ -547,36 +559,40 @@ func parseClientListString(clientInfo string) (host string, port string, name st
 /*
 	valid example: db0:keys=1,expires=0,avg_ttl=0
 */
-func parseDBKeyspaceString(db string, stats string) (keysTotal float64, keysExpiringTotal float64, avgTTL float64, ok bool) {
-	ok = false
-	if !strings.HasPrefix(db, "db") {
+func parseDBKeyspaceString(inputKey string, inputVal string) (keysTotal float64, keysExpiringTotal float64, avgTTL float64, ok bool) {
+	log.Debugf("parseDBKeyspaceString inputKey: [%s] inputVal: [%s]", inputKey, inputVal)
+
+	if !strings.HasPrefix(inputKey, "db") {
+		log.Debugf("parseDBKeyspaceString inputKey not starting with 'db': [%s]", inputKey)
 		return
 	}
 
-	split := strings.Split(stats, ",")
+	split := strings.Split(inputVal, ",")
 	if len(split) != 3 && len(split) != 2 {
+		log.Debugf("parseDBKeyspaceString strings.Split(inputVal) invalid: %#v", split)
 		return
 	}
 
 	var err error
-	ok = true
 	if keysTotal, err = extractVal(split[0]); err != nil {
-		ok = false
+		log.Debugf("parseDBKeyspaceString extractVal(split[0]) invalid, err: %s", err)
 		return
 	}
 	if keysExpiringTotal, err = extractVal(split[1]); err != nil {
-		ok = false
+		log.Debugf("parseDBKeyspaceString extractVal(split[1]) invalid, err: %s", err)
 		return
 	}
 
 	avgTTL = -1
 	if len(split) > 2 {
 		if avgTTL, err = extractVal(split[2]); err != nil {
-			ok = false
+			log.Debugf("parseDBKeyspaceString extractVal(split[2]) invalid, err: %s", err)
 			return
 		}
 		avgTTL /= 1000
 	}
+
+	ok = true
 	return
 }
 
@@ -647,7 +663,7 @@ func (e *Exporter) extractConfigMetrics(ch chan<- prometheus.Metric, config []st
 		}
 
 		if val, err := strconv.ParseFloat(strVal, 64); err == nil {
-			e.registerConstMetricGauge(ch, fmt.Sprintf("config_%s", config[pos*2]), val)
+			e.registerConstMetricGauge(ch, fmt.Sprintf("config_%s", strKey), val)
 		}
 	}
 	return
@@ -660,7 +676,7 @@ func (e *Exporter) registerConstMetricGauge(ch chan<- prometheus.Metric, metric 
 func (e *Exporter) registerConstMetric(ch chan<- prometheus.Metric, metric string, val float64, valType prometheus.ValueType, labelValues ...string) {
 	descr := e.metricDescriptions[metric]
 	if descr == nil {
-		descr = newMetricDescr(e.options.Namespace, metric, metric+" metric", nil)
+		descr = newMetricDescr(e.options.Namespace, metric, metric+" metric", labelValues)
 	}
 
 	if m, err := prometheus.NewConstMetric(descr, valType, val, labelValues...); err == nil {
@@ -683,12 +699,18 @@ func (e *Exporter) handleMetricsCommandStats(ch chan<- prometheus.Metric, fieldK
 	}
 
 	splitValue := strings.Split(fieldValue, ",")
-	if len(splitValue) != 3 {
+	if len(splitValue) < 3 {
 		return
 	}
 
 	var calls float64
 	var usecTotal float64
+	var qps float64
+	var rt float64
+	var maxRt float64
+	var requestLen float64
+	var responseLen float64
+
 	var err error
 	if calls, err = extractVal(splitValue[0]); err != nil {
 		return
@@ -696,20 +718,51 @@ func (e *Exporter) handleMetricsCommandStats(ch chan<- prometheus.Metric, fieldK
 	if usecTotal, err = extractVal(splitValue[1]); err != nil {
 		return
 	}
+	if len(splitValue) > 7 {
+		if qps, err = extractVal(splitValue[3]); err != nil {
+			return
+		}
+		if rt, err = extractVal(splitValue[4]); err != nil {
+			return
+		}
+		if maxRt, err = extractVal(splitValue[5]); err != nil {
+			return
+		}
+		if requestLen, err = extractVal(splitValue[6]); err != nil {
+			return
+		}
+		if responseLen, err = extractVal(splitValue[7]); err != nil {
+			return
+		}
+	}
 
 	cmd := splitKey[1]
 	e.registerConstMetric(ch, "commands_total", calls, prometheus.CounterValue, cmd)
 	e.registerConstMetric(ch, "commands_duration_seconds_total", usecTotal/1e6, prometheus.CounterValue, cmd)
+	if len(splitValue) > 7 {
+		e.registerConstMetric(ch, "command_call_qps", qps, prometheus.CounterValue, cmd)
+		e.registerConstMetric(ch, "command_call_rt", rt/1e6, prometheus.CounterValue, cmd)
+		e.registerConstMetric(ch, "command_call_max_rt", maxRt/1e6, prometheus.CounterValue, cmd)
+		e.registerConstMetric(ch, "command_call_request_len", requestLen, prometheus.CounterValue, cmd)
+		e.registerConstMetric(ch, "command_call_response_len", responseLen, prometheus.CounterValue, cmd)
+	}
 }
 
-func (e *Exporter) handleMetricsReplication(ch chan<- prometheus.Metric, fieldKey string, fieldValue string) bool {
+func (e *Exporter) handleMetricsReplication(ch chan<- prometheus.Metric, masterHost string, masterPort string, fieldKey string, fieldValue string) bool {
 	// only slaves have this field
 	if fieldKey == "master_link_status" {
 		if fieldValue == "up" {
-			e.registerConstMetricGauge(ch, "master_link_up", 1)
+			e.registerConstMetricGauge(ch, "master_link_up", 1, masterHost, masterPort)
 		} else {
-			e.registerConstMetricGauge(ch, "master_link_up", 0)
+			e.registerConstMetricGauge(ch, "master_link_up", 0, masterHost, masterPort)
 		}
+		return true
+	}
+	switch fieldKey {
+
+	case "master_last_io_seconds_ago", "slave_repl_offset", "master_sync_in_progress":
+		val, _ := strconv.Atoi(fieldValue)
+		e.registerConstMetricGauge(ch, fieldKey, float64(val), masterHost, masterPort)
 		return true
 	}
 
@@ -749,11 +802,14 @@ func (e *Exporter) extractInfoMetrics(ch chan<- prometheus.Metric, info string, 
 
 	fieldClass := ""
 	lines := strings.Split(info, "\n")
+	masterHost := ""
+	masterPort := ""
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		log.Debugf("info: %s", line)
-		if len(line) > 0 && line[0] == '#' {
+		if len(line) > 0 && strings.HasPrefix(line, "# ") {
 			fieldClass = line[2:]
+			log.Debugf("set fieldClass: %s", fieldClass)
 			continue
 		}
 
@@ -770,6 +826,14 @@ func (e *Exporter) extractInfoMetrics(ch chan<- prometheus.Metric, info string, 
 			slaveInfoFields    = map[string]bool{"master_host": true, "master_port": true, "slave_read_only": true}
 		)
 
+		if fieldKey == "master_host" {
+			masterHost = fieldValue
+		}
+
+		if fieldKey == "master_port" {
+			masterPort = fieldValue
+		}
+
 		if _, ok := instanceInfoFields[fieldKey]; ok {
 			instanceInfo[fieldKey] = fieldValue
 			continue
@@ -783,7 +847,7 @@ func (e *Exporter) extractInfoMetrics(ch chan<- prometheus.Metric, info string, 
 		switch fieldClass {
 
 		case "Replication":
-			if ok := e.handleMetricsReplication(ch, fieldKey, fieldValue); ok {
+			if ok := e.handleMetricsReplication(ch, masterHost, masterPort, fieldKey, fieldValue); ok {
 				continue
 			}
 
@@ -1061,7 +1125,6 @@ var errNotFound = errors.New("key not found")
 
 // getKeyInfo takes a key and returns the type, and the size or length of the value stored at that key.
 func getKeyInfo(c redis.Conn, key string) (info keyInfo, err error) {
-
 	if info.keyType, err = redis.String(doRedisCmd(c, "TYPE", key)); err != nil {
 		return info, err
 	}
@@ -1149,6 +1212,7 @@ func getKeysFromPatterns(c redis.Conn, keys []dbKeyPair) (expandedKeys []dbKeyPa
 			expandedKeys = append(expandedKeys, k)
 		}
 	}
+
 	return expandedKeys, err
 }
 
@@ -1161,7 +1225,12 @@ func (e *Exporter) connectToRedis() (redis.Conn, error) {
 		redis.DialTLSConfig(&tls.Config{
 			InsecureSkipVerify: e.options.SkipTLSVerification,
 			Certificates:       e.options.ClientCertificates,
+			RootCAs:            e.options.CaCertificates,
 		}),
+	}
+
+	if e.options.User != "" {
+		options = append(options, redis.DialUsername(e.options.User))
 	}
 
 	if e.options.Password != "" {
@@ -1172,6 +1241,7 @@ func (e *Exporter) connectToRedis() (redis.Conn, error) {
 	if !strings.Contains(uri, "://") {
 		uri = "redis://" + uri
 	}
+
 	log.Debugf("Trying DialURL(): %s", uri)
 	c, err := redis.DialURL(uri, options...)
 	if err != nil {
@@ -1203,7 +1273,7 @@ func (e *Exporter) scrapeRedisHost(ch chan<- prometheus.Metric) error {
 	defer c.Close()
 
 	log.Debugf("connected to: %s", e.redisAddr)
-	log.Debugf("took %f seconds", connectTookSeconds)
+	log.Debugf("connecting took %f seconds", connectTookSeconds)
 
 	if e.options.PingOnConnect {
 		startTime := time.Now()
@@ -1225,6 +1295,7 @@ func (e *Exporter) scrapeRedisHost(ch chan<- prometheus.Metric) error {
 
 	dbCount := 0
 	if config, err := redis.Strings(doRedisCmd(c, e.options.ConfigCommandName, "GET", "*")); err == nil {
+		log.Debugf("Redis CONFIG GET * result: [%#v]", config)
 		dbCount, err = e.extractConfigMetrics(ch, config)
 		if err != nil {
 			log.Errorf("Redis CONFIG err: %s", err)
@@ -1243,6 +1314,7 @@ func (e *Exporter) scrapeRedisHost(ch chan<- prometheus.Metric) error {
 			return err
 		}
 	}
+	log.Debugf("Redis INFO ALL result: [%#v]", infoAll)
 
 	if strings.Contains(infoAll, "cluster_enabled:1") {
 		if clusterInfo, err := redis.String(doRedisCmd(c, "CLUSTER", "INFO")); err == nil {
